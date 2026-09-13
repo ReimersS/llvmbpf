@@ -578,6 +578,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			srcName.empty() ? "lifted.bpf" : srcName, ".");
 		dbuilder->createCompileUnit(dwarf::DW_LANG_C, file,
 					    "llvmbpf", false, "", 0);
+		jitModule->addModuleFlag(Module::Warning, "Debug Info Version",
+					 DEBUG_METADATA_VERSION);
 		auto *subTy = dbuilder->createSubroutineType(
 			dbuilder->getOrCreateTypeArray(
 				llvm::ArrayRef<llvm::Metadata *>{}));
