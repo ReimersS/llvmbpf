@@ -1362,6 +1362,22 @@ this conversion.
 			}
 			break;
 		}
+		case EBPF_OP_MAY_GOTO: {
+			if (auto ret = localJmpDstAndNextBlk(pc, inst,
+							     instBlocks);
+			    ret) {
+				auto [dstBlk, nextBlk] = ret.get();
+				auto *flag = builder.CreateAlloca(
+					builder.getInt1Ty());
+				auto *ld = builder.CreateLoad(
+					builder.getInt1Ty(), flag);
+				cast<LoadInst>(ld)->setVolatile(true);
+				builder.CreateCondBr(ld, nextBlk, dstBlk);
+			} else {
+				return ret.takeError();
+			}
+			break;
+		}
 			// Call helper or local function
 		case EBPF_OP_CALL:
 			// Work around for clang producing instructions
