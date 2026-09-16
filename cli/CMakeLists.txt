@@ -37,10 +37,10 @@ set(LIBBPF_LIBRARIES ${LIBBPF_SOURCE_DIR}/src/libbpf.a)
 include_directories(${LIBBPF_INCLUDE_DIRS})
 
 add_dependencies(bpftime-vm-cli spdlog::spdlog llvmbpf_vm libbpf_project)
-target_link_libraries(bpftime-vm-cli 
-            PRIVATE spdlog::spdlog llvmbpf_vm 
-            ${LIBBPF_LIBRARIES} 
-            elf 
+target_link_libraries(bpftime-vm-cli
+            PRIVATE spdlog::spdlog llvmbpf_vm nlohmann_json::nlohmann_json
+            ${LIBBPF_LIBRARIES}
+            elf
             z
 )
 set_property(TARGET bpftime-vm-cli PROPERTY CXX_STANDARD 20)

@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <fstream>
 #include "llvmbpf.hpp"
+#include <nlohmann/json.hpp>
 
 /*
  * Forward declarations from libbpf.  We cannot include <bpf/libbpf.h>
@@ -175,6 +176,8 @@ static void print_usage(const std::string &program_name)
 		<< "  build <EBPF_ELF> [-o <output_directory>] [-emit-llvm]\n"
 		<< "      Build native ELF(s) from eBPF ELF. Each program in the eBPF ELF will be built into a single native ELF.\n"
 		<< "      If -emit-llvm is specified, the LLVM IR will be printed to stdout.\n"
+		<< "  build-xlated <JSON_FILE> [-o <output_directory>] [-emit-llvm] [--name <prog_name>]\n"
+		<< "      Build from bpftool JSON output (bpftool -j prog dump xlated opcodes linum).\n"
 		<< "  run <PATH> [MEMORY]\n"
 		<< "      Run a native eBPF program.\n";
 }
@@ -285,6 +288,190 @@ static int build_ebpf_program(const std::string &ebpf_elf,
 	return had_failure ? 1 : 0;
 }
 
+struct parsed_xlated {
+	std::vector<uint8_t> code;
+	std::vector<btf_line_info_entry> line_info;
+	std::vector<std::string> helper_names;
+};
+
+static uint8_t parse_hex(const std::string &s)
+{
+	return (uint8_t)strtoul(s.c_str(), nullptr, 16);
+}
+
+static parsed_xlated parse_bpftool_json(const std::string &path)
+{
+	parsed_xlated result;
+
+	std::ifstream file(path);
+	if (!file.is_open()) {
+		SPDLOG_CRITICAL("Unable to open: {}", path);
+		return result;
+	}
+
+	nlohmann::json j;
+	try {
+		file >> j;
+	} catch (const nlohmann::json::parse_error &e) {
+		SPDLOG_CRITICAL("JSON parse error: {}", e.what());
+		return result;
+	}
+
+	if (!j.is_array()) {
+		SPDLOG_CRITICAL("Expected JSON array");
+		return result;
+	}
+
+	std::map<uint32_t, uint32_t> call_remap;
+	uint32_t next_helper_id = 0;
+
+	for (const auto &insn : j) {
+		if (!insn.contains("opcodes"))
+			continue;
+
+		uint32_t insn_idx = result.code.size() / 8;
+
+		if (insn.contains("file") && insn.contains("line_num") &&
+		    insn.contains("line_col")) {
+			btf_line_info_entry li;
+			li.insn_idx = insn_idx;
+			li.file_name = insn["file"].get<std::string>();
+			li.line = insn["line_num"].get<uint32_t>();
+			li.col = insn["line_col"].get<uint32_t>();
+			result.line_info.push_back(std::move(li));
+		}
+
+		const auto &op = insn["opcodes"];
+		uint8_t code = parse_hex(op["code"].get<std::string>());
+		uint8_t src = parse_hex(op["src_reg"].get<std::string>());
+		uint8_t dst = parse_hex(op["dst_reg"].get<std::string>());
+
+		const auto &off_arr = op["off"];
+		const auto &imm_arr = op["imm"];
+
+		/* Xlated bytecode: map references and kfunc calls are
+		 * already resolved, so clear src_reg on lddw and call
+		 * instructions to treat as plain immediates. */
+		if (code == 0x18 || code == 0x85)
+			src = 0;
+
+		result.code.push_back(code);
+		result.code.push_back((src << 4) | dst);
+		for (size_t i = 0; i < 2; i++)
+			result.code.push_back(
+				parse_hex(off_arr[i].get<std::string>()));
+		for (size_t i = 0; i < 4; i++)
+			result.code.push_back(
+				parse_hex(imm_arr[i].get<std::string>()));
+
+		if (code == 0x85) {
+			size_t imm_off = result.code.size() - 4;
+			uint32_t orig_imm = result.code[imm_off] |
+					    (result.code[imm_off + 1] << 8) |
+					    (result.code[imm_off + 2] << 16) |
+					    (result.code[imm_off + 3] << 24);
+
+			uint32_t new_id;
+			auto it = call_remap.find(orig_imm);
+			if (it != call_remap.end()) {
+				new_id = it->second;
+			} else {
+				new_id = next_helper_id++;
+				call_remap[orig_imm] = new_id;
+
+				std::string name =
+					"helper_" + std::to_string(new_id);
+				if (insn.contains("disasm")) {
+					auto d = insn["disasm"]
+							 .get<std::string>();
+					auto cp = d.find("call ");
+					auto hp = d.rfind('#');
+					if (cp != std::string::npos &&
+					    hp != std::string::npos &&
+					    hp > cp + 5)
+						name = d.substr(cp + 5,
+								hp - cp - 5);
+				}
+				result.helper_names.push_back(name);
+			}
+
+			result.code[imm_off + 0] = new_id & 0xff;
+			result.code[imm_off + 1] = (new_id >> 8) & 0xff;
+			result.code[imm_off + 2] = (new_id >> 16) & 0xff;
+			result.code[imm_off + 3] = (new_id >> 24) & 0xff;
+		}
+
+		/* lddw: second 8-byte slot */
+		if (code == 0x18 && imm_arr.size() == 12) {
+			result.code.push_back(0);
+			result.code.push_back(0);
+			result.code.push_back(0);
+			result.code.push_back(0);
+			for (size_t i = 8; i < 12; i++)
+				result.code.push_back(parse_hex(
+					imm_arr[i].get<std::string>()));
+		}
+	}
+
+	return result;
+}
+
+static int build_xlated_program(const std::string &json_file,
+				const std::filesystem::path &output,
+				bool emit_llvm, const std::string &prog_name)
+{
+	auto parsed = parse_bpftool_json(json_file);
+
+	if (parsed.code.empty()) {
+		SPDLOG_CRITICAL("No instructions parsed from {}", json_file);
+		return 1;
+	}
+
+	if (!emit_llvm) {
+		SPDLOG_INFO("Parsed {} instruction slots, {} line info entries",
+			    parsed.code.size() / 8, parsed.line_info.size());
+	}
+
+	llvmbpf_vm vm;
+
+	if (vm.load_code(parsed.code.data(), parsed.code.size()) < 0) {
+		SPDLOG_ERROR("Unable to load instructions: {}",
+			     vm.get_error_message());
+		return 1;
+	}
+
+	if (!parsed.line_info.empty())
+		vm.load_line_info(parsed.line_info);
+
+	for (size_t i = 0; i < parsed.helper_names.size(); i++) {
+		vm.register_external_function(i, parsed.helper_names[i],
+					      nullptr);
+	}
+
+	auto result = vm.do_aot_compile(emit_llvm);
+	if (!result) {
+		SPDLOG_ERROR("Failed to compile: {}", vm.get_error_message());
+		return 1;
+	}
+
+	auto out_path = output / (prog_name + ".o");
+	std::ofstream ofs(out_path, std::ios::binary);
+	if (!ofs.is_open()) {
+		SPDLOG_ERROR("Failed to open output: {}", out_path.string());
+		return 1;
+	}
+	ofs.write((const char *)result->data(), result->size());
+	if (!ofs.good()) {
+		SPDLOG_ERROR("Failed to write output: {}", out_path.string());
+		return 1;
+	}
+	if (!emit_llvm)
+		SPDLOG_INFO("Program {} written to {}", prog_name,
+			    out_path.c_str());
+
+	return 0;
+}
+
 using bpf_func = uint64_t (*)(const void *, uint64_t);
 
 static int run_ebpf_program(const std::filesystem::path &elf,
@@ -392,6 +579,35 @@ int main(int argc, const char **argv)
 		bool emit_llvm = has_argument(argc, argv, "-emit-llvm");
 
 		return build_ebpf_program(ebpf_elf, output, emit_llvm);
+	} else if (command == "build-xlated") {
+		if (argc < 3) {
+			print_usage(argv[0]);
+			return 1;
+		}
+
+		std::string json_file = argv[2];
+		std::string output = ".";
+		std::string prog_name = "prog";
+
+		for (int i = 3; i < argc; ++i) {
+			auto opt_output =
+				parse_optional_argument(argc, argv, i, "-o");
+			if (opt_output) {
+				output = *opt_output;
+				continue;
+			}
+			auto opt_name =
+				parse_optional_argument(argc, argv, i, "--name");
+			if (opt_name) {
+				prog_name = *opt_name;
+				continue;
+			}
+		}
+
+		bool emit_llvm = has_argument(argc, argv, "-emit-llvm");
+
+		return build_xlated_program(json_file, output, emit_llvm,
+					    prog_name);
 	} else if (command == "run") {
 		if (argc < 3) {
 			print_usage(argv[0]);

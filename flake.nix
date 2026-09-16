@@ -25,6 +25,7 @@
           pkgs.libbpf
           pkgs.elfutils
           pkgs.zlib
+          pkgs.nlohmann_json
         ];
 
         cmakeFlags = [
@@ -45,8 +46,9 @@
           target_include_directories(bpftime-vm-cli PRIVATE
             ''${SPDLOG_INCLUDE} ''${CMAKE_CURRENT_SOURCE_DIR}/../include ''${LIBBPF_INCLUDE_DIRS})
           target_link_directories(bpftime-vm-cli PRIVATE ''${LIBBPF_LIBRARY_DIRS})
+          find_package(nlohmann_json REQUIRED)
           add_dependencies(bpftime-vm-cli spdlog::spdlog llvmbpf_vm)
-          target_link_libraries(bpftime-vm-cli PRIVATE spdlog::spdlog llvmbpf_vm ''${LIBBPF_LIBRARIES} elf z)
+          target_link_libraries(bpftime-vm-cli PRIVATE spdlog::spdlog llvmbpf_vm nlohmann_json::nlohmann_json ''${LIBBPF_LIBRARIES} elf z)
           target_compile_definitions(bpftime-vm-cli PRIVATE _GNU_SOURCE)
           EOF
         '';
