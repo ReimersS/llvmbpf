@@ -21,7 +21,7 @@ include(ExternalProject)
 ExternalProject_Add(
     libbpf_project
     GIT_REPOSITORY https://github.com/libbpf/libbpf.git
-    GIT_TAG v1.2.0 # Replace with the version you need
+    GIT_TAG v1.5.0
     CONFIGURE_COMMAND ""
     BUILD_COMMAND make -C src -j
     BUILD_IN_SOURCE TRUE

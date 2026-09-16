@@ -1383,23 +1383,29 @@ this conversion.
 			// Work around for clang producing instructions
 			// that we don't support
 		case EBPF_OP_CALL | 0x8: {
-			// Call local function
 			if (inst.src == 0x1) {
-				if (kernel_compatible_mode) {
-					const auto target_pc =
-						static_cast<int64_t>(pc) + 1 +
-						inst.imm;
-					if (target_pc < 0 ||
-					    target_pc >=
-						    static_cast<int64_t>(
-							    insts.size())) {
-						return llvm::make_error<
-							llvm::StringError>(
-							"Kernel-compatible lift found an out-of-range BPF-to-BPF target at pc " +
-								std::to_string(
-									pc),
-							llvm::inconvertibleErrorCode());
+				const auto target_pc =
+					static_cast<int64_t>(pc) + 1 +
+					inst.imm;
+				bool is_resolved_local =
+					target_pc >= 0 &&
+					target_pc <
+						static_cast<int64_t>(
+							insts.size()) &&
+					target_pc != static_cast<int64_t>(pc);
+				if (!is_resolved_local) {
+					// Unresolved relocation (e.g. kfunc)
+					if (auto exp = emitExtFuncCall(
+						    builder, inst, extFunc,
+						    &regs[0], helperFuncTy,
+						    pc, exitBlk, true,
+						    kernel_compatible_mode);
+					    !exp) {
+						return exp.takeError();
 					}
+					break;
+				}
+				if (kernel_compatible_mode) {
 					auto itr = kernelPseudoCallFunc.find(
 						static_cast<uint16_t>(
 							target_pc));
