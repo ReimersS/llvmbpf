@@ -373,7 +373,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		IRBuilder<> builder(setupBlock);
 		// Create registers
 
-		for (int i = 0; i <= 10; i++) {
+		for (int i = 0; i <= 11; i++) {
 			regs.push_back(builder.CreateAlloca(
 				builder.getInt64Ty(), nullptr,
 				"r" + std::to_string(i)));
@@ -624,7 +624,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			}
 		}
 		// Precheck for registers
-		if (inst.dst > 10 || inst.src > 10) {
+		if (inst.dst > 11 || inst.src > 11) {
 			return llvm::make_error<llvm::StringError>(
 				"Illegal src reg/dst reg at pc " +
 					std::to_string(pc),
