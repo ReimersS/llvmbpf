@@ -894,7 +894,11 @@ this conversion.
 		case EBPF_OP_MOV_IMM:
 		case EBPF_OP_MOV64_REG:
 		case EBPF_OP_MOV_REG: {
-			bool is_mov_sx = inst.offset != 0;
+			// movsx: offset 8/16/32; other offsets (e.g.
+			// BPF_ADDR_SPACE_CAST=1) are plain mov.
+			bool is_mov_sx = inst.offset == 8 ||
+					 inst.offset == 16 ||
+					 inst.offset == 32;
 			Value *src_val =
 				emitLoadALUSource(inst, &regs[0], builder);
 			Value *result;
@@ -921,14 +925,8 @@ this conversion.
 							builder.getInt32Ty()),
 						builder.getInt32Ty());
 				} else {
-					return llvm::make_error<
-						llvm::StringError>(
-						"Invalid offset " +
-							std::to_string(
-								inst.offset) +
-							" for movsx at pc " +
-							std::to_string(pc),
-						llvm::inconvertibleErrorCode());
+					llvm_unreachable(
+						"movsx offset already checked");
 				}
 				if (is_alu64(inst)) {
 					// convert it to u64  is not needed,
