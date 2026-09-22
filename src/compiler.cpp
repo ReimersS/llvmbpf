@@ -567,26 +567,52 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	std::unique_ptr<DIBuilder> dbuilder;
 	DISubprogram *dbgSP = nullptr;
 
+	// Map from filename → DILexicalBlockFile so instructions from
+	// different BTF source files get the correct file scope while
+	// all sharing the function's single DISubprogram.
+	std::map<std::string, DILexicalBlockFile *> fileBlockMap;
+
 	if (!vm.line_info_.empty()) {
 		for (const auto &entry : vm.line_info_)
 			lineInfoMap[static_cast<uint16_t>(entry.insn_idx)] =
 				&entry;
 
 		dbuilder = std::make_unique<DIBuilder>(*jitModule);
-		const auto &srcName = vm.line_info_.front().file_name;
-		auto *file = dbuilder->createFile(
-			srcName.empty() ? "lifted.bpf" : srcName, ".");
-		dbuilder->createCompileUnit(dwarf::DW_LANG_C, file,
+
+		// Collect unique filenames from BTF line info.
+		// Use the first one for the compile unit and function SP.
+		auto firstSrc = vm.line_info_.front().file_name;
+		if (firstSrc.starts_with("./"))
+			firstSrc = firstSrc.substr(2);
+		auto *cuFile = dbuilder->createFile(
+			firstSrc.empty() ? "lifted.bpf" : firstSrc, ".");
+		dbuilder->createCompileUnit(dwarf::DW_LANG_C, cuFile,
 					    "llvmbpf", false, "", 0);
 		jitModule->addModuleFlag(Module::Warning, "Debug Info Version",
 					 DEBUG_METADATA_VERSION);
 		auto *subTy = dbuilder->createSubroutineType(
 			dbuilder->getOrCreateTypeArray(
 				llvm::ArrayRef<llvm::Metadata *>{}));
+
 		dbgSP = dbuilder->createFunction(
-			file, bpf_func->getName(), "", file, 0, subTy, 0,
+			cuFile, bpf_func->getName(), "", cuFile, 0, subTy, 0,
 			DINode::FlagZero, DISubprogram::SPFlagDefinition);
 		bpf_func->setSubprogram(dbgSP);
+
+		// Create DILexicalBlockFile for each unique source file
+		// so DILocations carry the correct filename.
+		for (const auto &entry : vm.line_info_) {
+			auto fn = entry.file_name;
+			if (fn.starts_with("./"))
+				fn = fn.substr(2);
+			if (fn.empty())
+				fn = "lifted.bpf";
+			if (fileBlockMap.count(fn))
+				continue;
+			auto *f = dbuilder->createFile(fn, ".");
+			fileBlockMap[fn] =
+				dbuilder->createLexicalBlockFile(dbgSP, f);
+		}
 	}
 
 	// Iterate over instructions
@@ -612,11 +638,19 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			auto it = lineInfoMap.upper_bound(pc);
 			if (it != lineInfoMap.begin()) {
 				--it;
+				auto fn = it->second->file_name;
+				if (fn.starts_with("./"))
+					fn = fn.substr(2);
+				if (fn.empty())
+					fn = "lifted.bpf";
+				DIScope *scope = fileBlockMap.count(fn)
+					? static_cast<DIScope *>(fileBlockMap[fn])
+					: static_cast<DIScope *>(dbgSP);
 				builder.SetCurrentDebugLocation(
 					DILocation::get(*context,
 							it->second->line,
 							it->second->col,
-							dbgSP));
+							scope));
 			} else {
 				builder.SetCurrentDebugLocation(
 					DILocation::get(*context, 0, 0,
